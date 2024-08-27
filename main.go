@@ -11,12 +11,14 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"syscall"
+	"time"
 
 	"comail.io/go/colog"
 	"github.com/bgentry/speakeasy"
-	"github.com/kr/pty"
+	"github.com/creack/pty"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
@@ -69,23 +71,27 @@ func init() {
 }
 
 func preRun(cmd *cobra.Command, args []string) {
-	var cl *colog.CoLog
-	logger, cl = makeLogger()
+	var logger *colog.CoLog
+	logger = makeLogger()
 
 	if flagTrace {
-		cl.SetMinLevel(colog.LTrace)
+		logger.SetMinLevel(colog.LTrace)
 	} else if flagVerbose {
-		cl.SetMinLevel(colog.LDebug)
+		logger.SetMinLevel(colog.LDebug)
 	} else if flagQuiet {
-		cl.SetMinLevel(colog.LWarning)
+		logger.SetMinLevel(colog.LWarning)
 	} else {
-		cl.SetMinLevel(colog.LInfo)
+		logger.SetMinLevel(colog.LInfo)
 	}
 
 }
 
 func main() {
-	mainCommand.Execute()
+	for {
+		runtime.GC()
+		_ = mainCommand.Execute()
+		time.Sleep(time.Second)
+	}
 }
 
 func runMain(cmd *cobra.Command, args []string) {
@@ -102,20 +108,9 @@ func runMain(cmd *cobra.Command, args []string) {
 	}
 
 	config := &ssh.ClientConfig{
-		User: flagSSHUsername,
-		Auth: nil,
-	}
-
-	// Password auth or prompt callback
-	if flagSSHPassword != "" {
-		log.Println("trace: adding password auth")
-		config.Auth = append(config.Auth, ssh.Password(flagSSHPassword))
-	} else {
-		log.Println("trace: adding password callback auth")
-		config.Auth = append(config.Auth, ssh.PasswordCallback(func() (string, error) {
-			prompt := fmt.Sprintf("%s@%s's password: ", flagSSHUsername, sshHost)
-			return speakeasy.Ask(prompt)
-		}))
+		User:            flagSSHUsername,
+		Auth:            nil,
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}
 
 	// Key auth
@@ -128,6 +123,18 @@ func runMain(cmd *cobra.Command, args []string) {
 
 		log.Println("trace: adding identity file auth")
 		config.Auth = append(config.Auth, auth)
+	} else {
+		// Password auth or prompt callback
+		if flagSSHPassword != "" {
+			log.Println("trace: adding password auth")
+			config.Auth = append(config.Auth, ssh.Password(flagSSHPassword))
+		} else {
+			log.Println("trace: adding password callback auth")
+			config.Auth = append(config.Auth, ssh.PasswordCallback(func() (string, error) {
+				prompt := fmt.Sprintf("%s@%s's password: ", flagSSHUsername, sshHost)
+				return speakeasy.Ask(prompt)
+			}))
+		}
 	}
 
 	// SSH agent auth
@@ -169,9 +176,18 @@ func runMain(cmd *cobra.Command, args []string) {
 
 	// Dial the SSH connection
 	log.Printf("debug: attempting %d authentication methods (%+v)", len(config.Auth), config.Auth)
+
+	for {
+		connect(sshHost, config)
+		log.Println("info: connect failed, will reconnect after 30 seconds")
+		time.Sleep(time.Second * 30)
+	}
+}
+
+func connect(sshHost string, config *ssh.ClientConfig) {
 	sshConn, err := ssh.Dial("tcp", sshHost, config)
 	if err != nil {
-		log.Fatalf("error: error dialing remote host: %s", err)
+		log.Fatalf("error: error dialing remote host: %s, conf: %+v, err: %v", sshHost, config, err)
 	}
 	defer sshConn.Close()
 
@@ -179,13 +195,18 @@ func runMain(cmd *cobra.Command, args []string) {
 	l, err := sshConn.Listen("tcp", flagAddr)
 	if err != nil {
 		log.Fatalf("error: error listening on remote host: %s", err)
+		return
 	}
+	defer l.Close()
 
 	// Start accepting shell connections
 	log.Printf("info: listening for connections on %s (remote listen address: %s)", sshHost, flagAddr)
 	for {
 		conn, err := l.Accept()
 		if err != nil {
+			if err == io.EOF {
+				return
+			}
 			log.Printf("error: error accepting connection: %s", err)
 			continue
 		}
@@ -324,23 +345,32 @@ func ParsePEMBlock(block *pem.Block) (interface{}, error) {
 	}
 }
 
-func makeLogger() (*log.Logger, *colog.CoLog) {
-	// Create logger
-	logger := log.New(os.Stderr, "", 0)
-
+func makeLogger() *colog.CoLog {
 	// Create colog instance
-	cl := colog.NewCoLog(os.Stderr, "", 0)
-
-	// TODO: can set custom headers here
-	// colog.AddHeader("[foo] ", colog.LError)
+	logger := colog.NewCoLog(os.Stderr, "[RSSH]", log.Lshortfile)
 
 	// Overwrite both standard library and custom logger with this colog instance.
-	log.SetOutput(cl)
-	logger.SetOutput(cl)
-
-	// Overwrite flags on stdlib logger
-	log.SetPrefix("")
-	log.SetFlags(0)
-
-	return logger, cl
+	log.SetOutput(logger)
+	return logger
 }
+
+// func makeLogger() (*log.Logger, *colog.CoLog) {
+// 	// Create logger
+// 	logger := log.New(os.Stderr, "", 0)
+
+// 	// Create colog instance
+// 	cl := colog.NewCoLog(os.Stderr, "", log.Lshortfile)
+
+// 	// TODO: can set custom headers here
+// 	// colog.AddHeader("[foo] ", colog.LError)
+
+// 	// Overwrite both standard library and custom logger with this colog instance.
+// 	log.SetOutput(cl)
+// 	logger.SetOutput(cl)
+
+// 	// Overwrite flags on stdlib logger
+// 	log.SetPrefix("")
+// 	log.SetFlags(0)
+
+// 	return logger, cl
+// }

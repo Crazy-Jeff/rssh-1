@@ -1,0 +1,12 @@
+[Unit]
+Description=RSSH Server.
+
+[Service]
+Type=simple
+ExecStart=/bin/bash -c "/data/apps/rssh/rssh -a '127.0.0.1:23333' -u dev -i ~/.ssh/id_rsa SERVER_HOST:PORT"
+Restart=always
+User=root
+
+[Install]
+WantedBy=multi-user.target
+
